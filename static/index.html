@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IEOTBSM — Live trust simulation</title>
+  <link rel="stylesheet" href="/static/dashboard.css" />
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <div class="hero-text">
+        <p class="kicker">IEOTBSM agentic extension · Hexmoor, Wilson &amp; Bhattaram (2006)</p>
+        <h1>Trust-gated cross-org intelligence</h1>
+        <p class="lede">
+          Watch inter-organizational trust tau move as boundary spanners, internal agents, and TPM4 human review
+          handle each query. Open via <code>/</code> so your session cookie is set.
+        </p>
+      </div>
+      <div class="hero-stats">
+        <div class="stat">
+          <span class="stat-label">Cycle</span>
+          <span class="stat-value" id="statCycle">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Human reviews</span>
+          <span class="stat-value" id="statHR">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Live phase</span>
+          <span class="stat-value phase" id="phaseBadge">Idle</span>
+        </div>
+      </div>
+    </header>
+
+    <section class="toolbar">
+      <button type="button" class="btn primary" id="btnRefresh">Refresh state</button>
+      <button type="button" class="btn" id="btnReset">Reset session</button>
+      <label class="field-inline">Step delay (ms)
+        <input type="number" id="throttle" value="140" min="0" max="5000" />
+      </label>
+      <label class="check"><input type="checkbox" id="verboseLog" /> Show raw JSON in log</label>
+    </section>
+
+    <section class="panel results-panel" id="resultsPanel" hidden>
+      <div class="results-head">
+        <h2>Last synthesis</h2>
+        <div class="metrics-pills" id="metricsPills"></div>
+      </div>
+      <pre class="answer-block" id="answerBlock"></pre>
+      <div class="trust-summary" id="trustSummary"></div>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Demo scenarios</h2>
+      <p class="panel-hint">Six-scene arc — run one scene or the full storyline. Trust carries across queries in your session.</p>
+      <div class="scenario-grid" id="scenarioGrid"></div>
+      <div class="scenario-actions">
+        <button type="button" class="btn primary" id="btnDemo">Run full storyline</button>
+      </div>
+    </section>
+
+    <section class="grid-main">
+      <div class="panel">
+        <h2 class="panel-title">Inter-org trust matrix</h2>
+        <p class="legend">
+          <span class="lg"><i class="sw high"></i> high tau</span>
+          <span class="lg"><i class="sw mid"></i> medium</span>
+          <span class="lg"><i class="sw low"></i> low</span>
+        </p>
+        <div id="matrixWrap"></div>
+        <p class="meta" id="metaState"></p>
+      </div>
+      <div class="panel">
+        <h2 class="panel-title">Custom query</h2>
+        <form id="qform">
+          <label>Requesting org
+            <select id="orgSelect" name="requesting_org_id"></select>
+          </label>
+          <label>Sensitivity
+            <select id="sensSelect" name="sensitivity">
+              <option value="PUBLIC">PUBLIC</option>
+              <option value="INTERNAL" selected>INTERNAL</option>
+              <option value="CONFIDENTIAL">CONFIDENTIAL</option>
+              <option value="RESTRICTED">RESTRICTED</option>
+            </select>
+          </label>
+          <label>Query
+            <textarea id="queryText" rows="4" placeholder="Cross-org question matching knowledge-base keywords..."></textarea>
+          </label>
+          <button type="submit" class="btn primary wide">Run custom query</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="panel log-panel">
+      <div class="log-head">
+        <h2 class="panel-title">Event timeline</h2>
+        <button type="button" class="btn small" id="btnClearLog">Clear</button>
+      </div>
+      <div id="log" class="log"></div>
+    </section>
+  </div>
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

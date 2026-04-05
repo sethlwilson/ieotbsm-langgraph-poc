@@ -1,0 +1,16 @@
+# IEOTBSM PoC — install everything with: pip install -r requirements.txt
+#
+# Core: simulation + LangGraph + LangChain messages
+langgraph>=0.2.0
+langchain-core>=0.3.0
+
+# LLM backends (Claude API and/or local Ollama)
+langchain-anthropic>=0.2.0
+langchain-ollama>=0.2.0
+
+# Optional: LangGraph tracing in LangSmith (--langgraph --langsmith)
+langsmith>=0.1.0
+
+# Browser dashboard (FastAPI + SSE)
+fastapi>=0.110
+uvicorn[standard]>=0.27
