@@ -64,6 +64,5 @@ Thumbs.db
 # LangSmith / local tooling caches (if any)
 .langsmith/
 
-.python-version
 .venv
 .vscode/
