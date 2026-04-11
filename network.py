@@ -33,7 +33,7 @@ from trust_engine import (
 # ─────────────────────────────────────────────────────────────
 
 ORG_CONFIGS = [
-    {"id": "org_0", "name": "Acme Corp",         "domain": "market_intelligence"},
+    {"id": "org_0", "name": "Acme Corp",          "domain": "market_intelligence"},
     {"id": "org_1", "name": "Nexus Labs",         "domain": "threat_intelligence"},
     {"id": "org_2", "name": "Sentinel AI",        "domain": "regulatory_compliance"},
     {"id": "org_3", "name": "Vertex Systems",     "domain": "supply_chain"},

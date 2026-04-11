@@ -2,6 +2,26 @@
 
 Proof-of-concept that extends **Hexmoor, Wilson & Bhattaram (2006)**, *A Theoretical Inter-organizational Trust-based Security Model* ([*The Knowledge Engineering Review*, 21(2), 127–161](https://doi.org/10.1017/S0269888906000732)) into an **agentic, cross-organizational RAG** setting: multiple enterprises, boundary spanners, sensitivity-aware trust gates (ISP-style), inter-org trust dynamics (τ), and TPM4-style human review. The codebase is educational and not production-hardened.
 
+## What this PoC demonstrates
+
+- A **multi-organization agent mesh** with an inter-org trust ledger, provenance, and gate outcomes you can inspect run to run.
+- A **pure simulation** path (no API keys) that runs scripted demos and prints trust matrices and synthesized answers, plus the same trust logic driving a **FastAPI dashboard** over **Server-Sent Events** for live playback.
+- An optional **LangGraph + LLM** path (Claude or local Ollama) that compiles the same conceptual workflow for tracing in **LangSmith** when enabled.
+- A teaching-oriented slice of the 2006 model—not a production security or compliance product.
+
+## Concepts (sketch)
+
+These terms match the paper’s spirit; see the article for formal definitions.
+
+- **Sensitivity** — Each query carries a label **INTERNAL**, **CONFIDENTIAL**, or **RESTRICTED**. Higher tiers raise the trust bar for cross-organization retrieval and cooperation (ISP-style enforcement at “edges” between orgs).
+- **Inter-organizational trust (τ)** — Directed trust values between organizations, updated as the simulation runs. Gates compare τ (and related state) against thresholds that depend on sensitivity.
+- **Trust gate** — Decides whether a cross-org hop is allowed, may **deny**, **approve**, or route to **human review** depending on policy and state.
+- **Trust Policy Models (TPM)** — After a violation, the ledger applies one of four modes (see `AgenticTPM` in [`trust_engine.py`](trust_engine.py)):
+  - **TPM1** — Proportional trust decay along the query / agent chain (paper Definition 24, TPM1).
+  - **TPM2** — Uniform decay on each edge in the chain (Definition 24, TPM2).
+  - **TPM3** — The initiator’s trust toward downstream chain agents is cut; inter-org trust is penalized (Definition 24, TPM3).
+  - **TPM4** — **Agentic extension:** queue the violation for **human review** before modifying trust. The implementation also enqueues human review for **CONFIDENTIAL** / **RESTRICTED** violations or **repeated** breaches between the same org pair, even when the selected TPM mode is 1–3.
+
 ## What’s in the repo
 
 | Piece | Role |
@@ -12,6 +32,21 @@ Proof-of-concept that extends **Hexmoor, Wilson & Bhattaram (2006)**, *A Theoret
 | [`run_poc.py`](run_poc.py) | CLI: full **simulation** (six scripted demos) or **LangGraph + LLM** |
 | [`dashboard_app.py`](dashboard_app.py) | **FastAPI** app: REST + **Server-Sent Events** live simulation UI |
 | [`static/`](static/) | Dashboard HTML/CSS/JS |
+
+## LangGraph workflow
+
+![LangGraph workflow: org orchestrator, trust gate, optional human review, boundary spanner, internal agent, synthesizer](diagram.png)
+
+Compiled LangGraph for the PoC (trust gate and human-review branches). Node naming and roles mirror the header comments in [`langgraph_impl.py`](langgraph_impl.py).
+
+- **`org_orchestrator`** — Organization-level supervisor: decomposes the task and coordinates which orgs participate.
+- **`trust_gate`** — Enforces ISP-style rules at org boundaries; may **approve** (continue to retrieval), **deny** (skip internal cross-org work), or send the run to **`human_review`**.
+- **`human_review`** — TPM4-style pause: a simulated approver may **approve** (resume via boundary spanner) or **deny** (short-circuit to synthesis).
+- **`boundary_spanner`** — Cross-org “edge” agent that spans boundaries when the gate allows.
+- **`internal_agent`** — In-org retrieval / RAG against simulated per-org knowledge.
+- **`synthesizer`** — Assembles the final answer (including refusal or partial results when paths were denied).
+
+**Edges:** Any **denied** path from `trust_gate` or `human_review` goes straight to **`synthesizer`**, which still produces a user-facing outcome without running boundary spanner / internal retrieval on that branch.
 
 ## Requirements
 
@@ -47,6 +82,17 @@ Optional trust knobs:
 ```bash
 python3 run_poc.py --tpm 4 --alpha 0.65 --decrement 0.06
 ```
+
+**Scripted demos** (in run order; defined as `DEMO_QUERIES` in [`run_poc.py`](run_poc.py)):
+
+| `scenario_id` | Title | What it stresses |
+|----------------|--------|------------------|
+| `silicon_ledger` | Operation Silicon Ledger | Cross-org market and supply-chain intel at **INTERNAL** sensitivity; gates open when τ is high enough. |
+| `red_cell_brief` | Red-Cell Briefing | **CONFIDENTIAL** threat / vulnerability brief; stricter thresholds, human-review and ledger stress. |
+| `capacity_wars` | Capacity Wars | Benchmarks vs cloud GPU pricing across orgs; boundary-spanner pairs and τ updates per hop. |
+| `regulatory_horizon` | Regulatory Horizon | **CONFIDENTIAL** mixed-domain query (compliance + workforce); tighter ISP behavior. |
+| `vault_seven` | Vault Seven | **RESTRICTED** threat telemetry and IOCs; highest τ bar—many denials unless trust grew in earlier scenes. |
+| `talent_pipeline` | Talent Pipeline | **INTERNAL** workforce analytics; softer bar—contrast after Vault Seven. |
 
 ### 2. Live dashboard (FastAPI + SSE)
 
@@ -104,11 +150,26 @@ Optional: `export LANGSMITH_PROJECT=your-project`. Use `--print-graph-mermaid` t
 | `--tpm` | Trust policy mode (default `4` = human review path) |
 | `--alpha`, `--decrement` | Inter-org trust parameters |
 
+## Trust knobs
+
+Simulation and LangGraph runs share the same trust-engine parameters via [`run_poc.py`](run_poc.py):
+
+- **`--tpm`** — Selects TPM **1**, **2**, **3**, or **4** (default **4**). See [Concepts (sketch)](#concepts-sketch) for behavior; defaults favor human-review escalation where the engine applies it.
+- **`--alpha`** — Weight **α** in the blend of inter-org τ and boundary-spanner trust when applying BS influence (paper Eq. 7; default **0.65**). Larger **α** weights inter-org τ more heavily in that blend.
+- **`--decrement`** — Base decrement applied in TPM decay paths (default **0.06**); larger values penalize violations more sharply when TPM1–3 apply.
+
 ## Design notes
 
 - **Simulation** path is self-contained and streams fine-grained events for the dashboard without requiring an LLM.
-- **LangGraph** path compiles a supervisor-style graph (orchestrator → trust gate → boundary spanner → internal RAG → synthesizer, with human-review branches) and can be traced in LangSmith.
+- **LangGraph** path compiles a supervisor-style graph (orchestrator → trust gate → boundary spanner → internal RAG → synthesizer, with human-review branches) and can be traced in LangSmith. See [LangGraph workflow](#langgraph-workflow).
 - **Session state** for the dashboard lives in memory on the server; restarting `uvicorn` clears all sessions.
+
+## Troubleshooting
+
+- **Dashboard, LangSmith, or FastAPI errors** — Install the full stack: `pip install -r requirements.txt`. A minimal install is enough for simulation-only CLI runs, not for `uvicorn` or `--langsmith`.
+- **`ANTHROPIC_API_KEY not set`** — LangGraph with default `--llm claude` needs this env var; use `--llm ollama` for a local model instead.
+- **`--langsmith requires --langgraph`** / **`--print-graph-mermaid requires --langgraph`** — Pass `--langgraph` on the same command.
+- **Dashboard API 401 or empty state** — Open the app at **`/`** on the same host/port first so the session cookie is set (see **Live dashboard** in Quick start).
 
 ## License / citation
 

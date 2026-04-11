@@ -258,8 +258,8 @@ class InterOrgTrustLedger:
 
     Core equations from §4.6:
       Eq 5: τ_i(om,on) = τ_0 / (τ_0 + (1−τ_0)·e^(−r·i))   [logistic growth]
-      Eq 6: r = Σ BS trust values / (xy)^x                  [BS-driven rate]
-      Eq 7: τ_bs = τ_org·α + τ_bs_prev·(1−α)               [instantaneous BS trust]
+      Eq 6: r = Σ BS trust values / (xy)^x                [BS-driven rate]
+      Eq 7: τ_bs = τ_org·α + τ_bs_prev·(1−α)              [instantaneous BS trust]
     """
 
     # Sensitivity-adjusted trust thresholds (agentic extension)
