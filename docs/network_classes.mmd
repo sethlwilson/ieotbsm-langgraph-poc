@@ -1,0 +1,106 @@
+classDiagram
+
+class IEOTBSMAgenticNetwork {
+    +List org_configs
+    +float alpha
+    +int tpm_mode
+    +Map orgs
+    +Map org_names
+    +Map internal_agents
+    +Map boundary_spanners
+    +InterOrgTrustLedger ledger
+    +Map agent_trust
+    +AgenticTPM tpm
+    +List human_review_queue
+    +List metrics_history
+    +int cycle
+    +TrustGate gate
+    +build_network()
+    +init_agent_trust()
+    +get_boundary_spanner()
+    +get_trust_matrix()
+    +get_agent_trust_summary()
+    +iter_query_simulation_events()
+    +execute_query_simulation()
+}
+
+class ORG_CONFIGS {
+    <<module_constant>>
+    +List org_dicts
+}
+
+class CAPABILITIES_BY_DOMAIN {
+    <<module_constant>>
+    +Map domain_to_caps
+}
+
+IEOTBSMAgenticNetwork ..> ORG_CONFIGS : defaults
+IEOTBSMAgenticNetwork ..> CAPABILITIES_BY_DOMAIN : caps
+
+class InterOrgTrustLedger {
+    <<trust_engine>>
+}
+
+class AgentTrustState {
+    <<trust_engine>>
+}
+
+class AgentIdentity {
+    <<trust_engine>>
+}
+
+class AgentRole {
+    <<trust_engine>>
+}
+
+class TrustGate {
+    <<trust_engine>>
+}
+
+class AgenticTPM {
+    <<trust_engine>>
+}
+
+class TrustViolation {
+    <<trust_engine>>
+}
+
+class QueryProvenance {
+    <<trust_engine>>
+}
+
+class SensitivityLevel {
+    <<trust_engine>>
+}
+
+class TrustMetrics {
+    <<trust_engine>>
+}
+
+class retrieve_from_org {
+    <<function>>
+    +String module_note
+}
+
+IEOTBSMAgenticNetwork *-- InterOrgTrustLedger : ledger
+IEOTBSMAgenticNetwork *-- TrustGate : gate
+IEOTBSMAgenticNetwork *-- AgenticTPM : tpm
+
+IEOTBSMAgenticNetwork o-- AgentIdentity : agents
+IEOTBSMAgenticNetwork o-- AgentTrustState : agent_trust
+IEOTBSMAgenticNetwork o-- TrustViolation : human_review_queue
+IEOTBSMAgenticNetwork o-- TrustMetrics : metrics_history
+
+TrustGate --> InterOrgTrustLedger : ledger
+TrustGate o-- AgentTrustState : agent_trust
+
+IEOTBSMAgenticNetwork ..> QueryProvenance : simulation
+IEOTBSMAgenticNetwork ..> TrustViolation : on failure
+IEOTBSMAgenticNetwork ..> TrustMetrics : per cycle
+IEOTBSMAgenticNetwork ..> SensitivityLevel : parameter
+IEOTBSMAgenticNetwork ..> AgentRole : provenance sign
+
+IEOTBSMAgenticNetwork ..> AgenticTPM : apply
+IEOTBSMAgenticNetwork ..> retrieve_from_org : retrieval
+
+note for retrieve_from_org "Defined in langgraph_impl lazy import inside iter_query_simulation_events"

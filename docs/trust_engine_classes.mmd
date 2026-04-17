@@ -1,0 +1,126 @@
+classDiagram
+
+class AgentRole {
+    <<enumeration>>
+}
+
+class SensitivityLevel {
+    <<enumeration>>
+}
+
+class ViolationType {
+    <<enumeration>>
+}
+
+class AgentIdentity {
+    +String agent_id
+    +String org_id
+    +AgentRole role
+    +String name
+    +List capabilities
+    +float reliability_score
+    +float created_at
+}
+
+class AgentTrustState {
+    +String trustor_id
+    +String trustee_id
+    +float base_trust
+    +int interaction_count
+    +float last_interaction
+    +int good_interactions
+    +int bad_interactions
+    +float recency_decay
+    +float effective_trust
+    +record_good()
+    +record_bad()
+}
+
+class QueryProvenance {
+    +String query_id
+    +String query_text
+    +SensitivityLevel sensitivity
+    +List agent_chain
+    +List retrieved_contexts
+    +List trust_checks
+    +boolean is_expired
+    +sign()
+    +add_context()
+    +log_trust_check()
+}
+
+class TrustViolation {
+    +String violation_id
+    +ViolationType violation_type
+    +SensitivityLevel sensitivity
+    +float trust_value
+    +float required_threshold
+    +List agent_chain_at_violation
+    +String status
+}
+
+class TrustMetrics {
+    +int cycle
+    +int intended_queries
+    +int unintended_queries
+    +int total_queries
+    +int human_review_count
+    +float ia_pct
+    +float sm_pct
+}
+
+class InterOrgTrustLedger {
+    +float alpha
+    +float rate_scale
+    +Map sensitivity_thresholds
+    +initialize()
+    +get()
+    +threshold_for()
+    +check()
+    +update()
+    +apply_bs_influence()
+    +penalize()
+    +matrix()
+    +history()
+}
+
+class AgenticTPM {
+    +int mode
+    +float decrement
+    +int repeat_threshold
+    +apply()
+}
+
+class TrustGate {
+    +InterOrgTrustLedger ledger
+    +Map agent_trust
+    +check_intra_org()
+    +check_inter_org()
+    +record_outcome()
+}
+
+AgentIdentity --> AgentRole : role
+
+QueryProvenance --> SensitivityLevel : sensitivity
+QueryProvenance ..> AgentRole : sign
+
+TrustViolation --> ViolationType : violation_type
+TrustViolation --> SensitivityLevel : sensitivity
+
+InterOrgTrustLedger --> SensitivityLevel : thresholds
+
+TrustGate --> InterOrgTrustLedger : ledger
+TrustGate o-- AgentTrustState : agent_trust
+
+TrustGate ..> QueryProvenance : logs checks
+TrustGate ..> SensitivityLevel : thresholds via ledger
+
+AgenticTPM ..> QueryProvenance : read chain
+AgenticTPM ..> AgentTrustState : mutate base_trust
+AgenticTPM ..> InterOrgTrustLedger : penalize TPM3
+AgenticTPM ..> TrustViolation : input mutate type
+AgenticTPM ..> SensitivityLevel : TPM4 branch
+
+note for AgentRole "INTERNAL BOUNDARY_SPANNER ORG_ORCHESTRATOR"
+note for SensitivityLevel "PUBLIC INTERNAL CONFIDENTIAL RESTRICTED"
+note for ViolationType "INSUFFICIENT_INTER_ORG_TRUST INSUFFICIENT_INTERPERSONAL_TRUST SENSITIVITY_THRESHOLD_BREACH PEDIGREE_CHAIN_BROKEN REPEATED_BREACH"

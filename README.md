@@ -6,7 +6,7 @@ Proof-of-concept that extends **Hexmoor, Wilson & Bhattaram (2006)**, *A Theoret
 
 - A **multi-organization agent mesh** with an inter-org trust ledger, provenance, and gate outcomes you can inspect run to run.
 - A **pure simulation** path (no API keys) that runs scripted demos and prints trust matrices and synthesized answers, plus the same trust logic driving a **FastAPI dashboard** over **Server-Sent Events** for live playback.
-- An optional **LangGraph + LLM** path (Claude or local Ollama) that compiles the same conceptual workflow for tracing in **LangSmith** when enabled.
+- An optional **LangGraph + LLM** path (Claude or local Ollama) that compiles the same conceptual workflow: **sequential multi-org fan-out** (each partner org runs trust gate → optional human review → boundary spanner → internal RAG, then advances to the next partner), **`--demo-id` / `--demo-index`** to pick a scripted preset, optional **`--stream`** to print accumulated state after each graph superstep, and **LangSmith** tracing when enabled.
 - A teaching-oriented slice of the 2006 model—not a production security or compliance product.
 
 ## Concepts (sketch)
@@ -37,16 +37,19 @@ These terms match the paper’s spirit; see the article for formal definitions.
 
 ![LangGraph workflow: org orchestrator, trust gate, optional human review, boundary spanner, internal agent, synthesizer](diagram.png)
 
-Compiled LangGraph for the PoC (trust gate and human-review branches). Node naming and roles mirror the header comments in [`langgraph_impl.py`](langgraph_impl.py).
+The figure above is a high-level illustration; the **current** topology (including **`advance_org`** and orchestrator shortcuts) matches [`langgraph_impl.py`](langgraph_impl.py) and the Mermaid text from **`python3 run_poc.py --langgraph --print-graph-mermaid`**.
 
-- **`org_orchestrator`** — Organization-level supervisor: decomposes the task and coordinates which orgs participate.
-- **`trust_gate`** — Enforces ISP-style rules at org boundaries; may **approve** (continue to retrieval), **deny** (skip internal cross-org work), or send the run to **`human_review`**.
-- **`human_review`** — TPM4-style pause: a simulated approver may **approve** (resume via boundary spanner) or **deny** (short-circuit to synthesis).
+Compiled LangGraph for the PoC (trust gate, human-review branches, and per-partner fan-out). Node naming and roles mirror the header comments in [`langgraph_impl.py`](langgraph_impl.py).
+
+- **`org_orchestrator`** — Organization-level supervisor: builds the partner list (`target_org_ids`), optional LLM sensitivity hint, and provenance. If there are **no** partner orgs with positive τ, the graph routes **directly** to **`synthesizer`**.
+- **`trust_gate`** — Enforces ISP-style rules at org boundaries for the **current** partner; may **approve** (continue to retrieval), **deny** (record a reason in `org_denials` when not escalated to human review), or send the run to **`human_review`** (CONFIDENTIAL / RESTRICTED failures).
+- **`human_review`** — TPM4-style pause: a simulated approver may **approve** (resume via boundary spanner) or **deny** (record `org_denials` for that partner).
 - **`boundary_spanner`** — Cross-org “edge” agent that spans boundaries when the gate allows.
 - **`internal_agent`** — In-org retrieval / RAG against simulated per-org knowledge.
-- **`synthesizer`** — Assembles the final answer (including refusal or partial results when paths were denied).
+- **`advance_org`** — After one partner’s branch completes (denied, human-denied, or post-RAG), moves to the **next** partner (back to **`trust_gate`**) or, when all partners are done, routes to **`synthesizer`**.
+- **`synthesizer`** — Assembles the final answer from accumulated **`org_answers`** and **`org_denials`** (LLM or markdown fallback).
 
-**Edges:** Any **denied** path from `trust_gate` or `human_review` goes straight to **`synthesizer`**, which still produces a user-facing outcome without running boundary spanner / internal retrieval on that branch.
+**Edges (multi-org):** Denied or completed paths go to **`advance_org`**, not immediately to **`synthesizer`**, so every partner in `target_org_ids` is visited in order. **`synthesizer`** runs **once** at the end.
 
 ## Requirements
 
@@ -85,7 +88,7 @@ python3 run_poc.py --tpm 4 --alpha 0.65 --decrement 0.06
 
 **Scripted demos** (in run order; defined as `DEMO_QUERIES` in [`run_poc.py`](run_poc.py)):
 
-| `scenario_id` | Title | What it stresses |
+| Preset id (`--demo-id`) | Title | What it stresses |
 |----------------|--------|------------------|
 | `silicon_ledger` | Operation Silicon Ledger | Cross-org market and supply-chain intel at **INTERNAL** sensitivity; gates open when τ is high enough. |
 | `red_cell_brief` | Red-Cell Briefing | **CONFIDENTIAL** threat / vulnerability brief; stricter thresholds, human-review and ledger stress. |
@@ -119,6 +122,22 @@ python3 run_poc.py --langgraph --llm claude
 
 Optional: `--model <claude-model-id>`.
 
+**Demo preset** (defaults to the first entry in `DEMO_QUERIES` if omitted):
+
+```bash
+python3 run_poc.py --langgraph --demo-id vault_seven
+python3 run_poc.py --langgraph --demo-index 2
+```
+
+`--demo-id` and `--demo-index` are mutually exclusive; ids match the **`id`** column in the [Scripted demos](#1-simulation-mode-no-api-keys) table.
+
+**Stream graph supersteps** (prints accumulated state after each LangGraph step; useful with `--langgraph`):
+
+```bash
+python3 run_poc.py --langgraph --stream
+python3 run_poc.py --langgraph --demo-id silicon_ledger --stream
+```
+
 ### 4. LangGraph + Ollama
 
 ```bash
@@ -126,6 +145,8 @@ python3 run_poc.py --langgraph --llm ollama
 # optional:
 python3 run_poc.py --langgraph --llm ollama --model llama3.2 --ollama-base-url http://127.0.0.1:11434
 ```
+
+You can combine Ollama with **`--demo-id`**, **`--demo-index`**, and **`--stream`** the same way as in §3.
 
 ### 5. LangSmith (with LangGraph)
 
@@ -135,7 +156,7 @@ export LANGSMITH_API_KEY=...
 python3 run_poc.py --langgraph --langsmith
 ```
 
-Optional: `export LANGSMITH_PROJECT=your-project`. Use `--print-graph-mermaid` to print a structural Mermaid diagram of the graph.
+Optional: `export LANGSMITH_PROJECT=your-project`. Use `--print-graph-mermaid` to print a structural Mermaid diagram of the graph (matches the compiled graph, including **`advance_org`** and the orchestrator “no partners” shortcut). **`--stream`** and **`--langsmith`** can be used together.
 
 ## CLI flags (summary)
 
@@ -147,6 +168,9 @@ Optional: `export LANGSMITH_PROJECT=your-project`. Use `--print-graph-mermaid` t
 | `--ollama-base-url` | Ollama server URL |
 | `--langsmith` | Enable LangSmith tracing (requires `--langgraph`) |
 | `--print-graph-mermaid` | Print Mermaid graph (requires `--langgraph`) |
+| `--demo-id ID` | LangGraph: run one preset from `DEMO_QUERIES` by **`id`** (mutually exclusive with `--demo-index`) |
+| `--demo-index N` | LangGraph: run preset by index `0 … n-1` (default **0** if neither demo flag is set) |
+| `--stream` | LangGraph: print accumulated state after each graph superstep (`stream_mode="values"`) |
 | `--tpm` | Trust policy mode (default `4` = human review path) |
 | `--alpha`, `--decrement` | Inter-org trust parameters |
 
@@ -161,14 +185,14 @@ Simulation and LangGraph runs share the same trust-engine parameters via [`run_p
 ## Design notes
 
 - **Simulation** path is self-contained and streams fine-grained events for the dashboard without requiring an LLM.
-- **LangGraph** path compiles a supervisor-style graph (orchestrator → trust gate → boundary spanner → internal RAG → synthesizer, with human-review branches) and can be traced in LangSmith. See [LangGraph workflow](#langgraph-workflow).
+- **LangGraph** path compiles a supervisor-style graph with **sequential multi-org fan-out**: orchestrator → (per partner) trust gate → optional human review → boundary spanner → internal RAG → **`advance_org`** loop → single **`synthesizer`**. It can be traced in LangSmith and optionally streamed with **`--stream`**. See [LangGraph workflow](#langgraph-workflow).
 - **Session state** for the dashboard lives in memory on the server; restarting `uvicorn` clears all sessions.
 
 ## Troubleshooting
 
 - **Dashboard, LangSmith, or FastAPI errors** — Install the full stack: `pip install -r requirements.txt`. A minimal install is enough for simulation-only CLI runs, not for `uvicorn` or `--langsmith`.
 - **`ANTHROPIC_API_KEY not set`** — LangGraph with default `--llm claude` needs this env var; use `--llm ollama` for a local model instead.
-- **`--langsmith requires --langgraph`** / **`--print-graph-mermaid requires --langgraph`** — Pass `--langgraph` on the same command.
+- **`--langsmith requires --langgraph`** / **`--print-graph-mermaid requires --langgraph`** / **`--stream requires --langgraph`** — Pass `--langgraph` on the same command.
 - **Dashboard API 401 or empty state** — Open the app at **`/`** on the same host/port first so the session cookie is set (see **Live dashboard** in Quick start).
 
 ## License / citation

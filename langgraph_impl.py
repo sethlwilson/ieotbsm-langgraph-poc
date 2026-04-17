@@ -99,6 +99,10 @@ class GraphState(dict):
 
     # Retrieved answers per org
     org_answers: dict[str, str]        # org_id → answer text
+    org_denials: dict[str, str]        # org_id → reason (trust / review skip)
+
+    # Multi-org sequential fan-out (index into target_org_ids)
+    fanout_org_idx: int
 
     # Human review
     human_review_queue: list[TrustViolation]
@@ -233,31 +237,47 @@ class IEOTBSMLangGraph:
         g.add_node("boundary_spanner", self._boundary_spanner_node)
         g.add_node("internal_agent", self._internal_agent_node)
         g.add_node("human_review", self._human_review_node)
+        g.add_node("advance_org", self._advance_org_node)
         g.add_node("synthesizer", self._synthesizer_node)
 
         # Entry
         g.set_entry_point("org_orchestrator")
 
         # Edges
-        g.add_edge("org_orchestrator", "trust_gate")
+        g.add_conditional_edges(
+            "org_orchestrator",
+            self._orchestrator_fanout_router,
+            {
+                "query_partners": "trust_gate",
+                "synthesize": "synthesizer",
+            },
+        )
         g.add_conditional_edges(
             "trust_gate",
             self._trust_gate_router,
             {
                 "approved": "boundary_spanner",
                 "human_review": "human_review",
-                "denied": "synthesizer",
+                "denied": "advance_org",
             }
         )
         g.add_edge("boundary_spanner", "internal_agent")
-        g.add_edge("internal_agent", "synthesizer")
+        g.add_edge("internal_agent", "advance_org")
         g.add_conditional_edges(
             "human_review",
             self._human_review_router,
             {
                 "approved": "boundary_spanner",
-                "denied": "synthesizer",
+                "denied": "advance_org",
             }
+        )
+        g.add_conditional_edges(
+            "advance_org",
+            self._advance_org_router,
+            {
+                "next_org": "trust_gate",
+                "synthesize": "synthesizer",
+            },
         )
         g.add_edge("synthesizer", END)
 
@@ -317,8 +337,16 @@ class IEOTBSMLangGraph:
             "target_org_ids": target_orgs,
             "current_target_org": target_orgs[0] if target_orgs else "",
             "org_answers": {},
+            "org_denials": dict(state.get("org_denials", {})),
+            "fanout_org_idx": 0,
             "provenance": prov,
         }
+
+    def _orchestrator_fanout_router(self, state: dict) -> str:
+        """Skip the per-org loop when there are no partner orgs to query."""
+        if not state.get("target_org_ids"):
+            return "synthesize"
+        return "query_partners"
 
     # ── Node: Trust Gate ─────────────────────────────────────
 
@@ -355,8 +383,8 @@ class IEOTBSMLangGraph:
                 requesting_org, target_org, sensitivity)
 
         violation = None
+        threshold = self.network.ledger.threshold_for(sensitivity)
         if not passed:
-            threshold = self.network.ledger.threshold_for(sensitivity)
             violation = TrustViolation(
                 query_id=prov.query_id,
                 violation_type=ViolationType.INSUFFICIENT_INTER_ORG_TRUST,
@@ -371,11 +399,26 @@ class IEOTBSMLangGraph:
             )
             prov.violations.append(violation.violation_id)
 
+        org_denials = dict(state.get("org_denials", {}))
+        # Record immediate denials only when we will not route to human_review
+        if (
+            not passed
+            and target_org
+            and violation is not None
+            and sensitivity
+            not in (SensitivityLevel.CONFIDENTIAL, SensitivityLevel.RESTRICTED)
+        ):
+            org_denials[target_org] = (
+                f"Inter-org trust check failed (effective trust {effective_trust:.2f}, "
+                f"required ≥ {threshold:.2f} for {sensitivity.value})."
+            )
+
         return {
             **state,
             "trust_passed": passed,
             "trust_value": effective_trust,
             "pending_violation": violation,
+            "org_denials": org_denials,
             "provenance": prov,
         }
 
@@ -426,10 +469,17 @@ class IEOTBSMLangGraph:
                 f"{violation.required_threshold:.2f}. Current: {violation.trust_value:.2f}."
             )
 
+        org_denials = dict(state.get("org_denials", {}))
+        if violation.status == "denied":
+            org_denials[violation.target_org] = (
+                violation.reviewer_notes or "Human review denied."
+            )
+
         return {
             **state,
             "trust_passed": violation.status == "approved",
             "human_review_queue": self.network.human_review_queue,
+            "org_denials": org_denials,
         }
 
     def _human_review_router(self, state: dict) -> str:
@@ -437,6 +487,29 @@ class IEOTBSMLangGraph:
         if violation and violation.status == "approved":
             return "approved"
         return "denied"
+
+    # ── Node: Advance multi-org fan-out ─────────────────────
+
+    def _advance_org_node(self, state: dict) -> dict:
+        """After finishing one partner org, move to the next or end the fan-out."""
+        targets: list[str] = list(state.get("target_org_ids", []))
+        idx = int(state.get("fanout_org_idx", 0)) + 1
+        if idx < len(targets):
+            return {
+                **state,
+                "fanout_org_idx": idx,
+                "current_target_org": targets[idx],
+                "trust_passed": False,
+                "pending_violation": None,
+            }
+        return {**state, "fanout_org_idx": idx}
+
+    def _advance_org_router(self, state: dict) -> str:
+        targets: list[str] = list(state.get("target_org_ids", []))
+        idx = int(state.get("fanout_org_idx", 0))
+        if idx >= len(targets):
+            return "synthesize"
+        return "next_org"
 
     # ── Node: Boundary Spanner ───────────────────────────────
 
@@ -554,36 +627,59 @@ class IEOTBSMLangGraph:
         """
         prov: QueryProvenance = state["provenance"]
         org_answers = state.get("org_answers", {})
+        org_denials = state.get("org_denials") or {}
         query = state["query_text"]
 
-        if not org_answers:
+        if not org_answers and not org_denials:
             final = (
                 "No cross-organizational data could be retrieved. "
                 "Trust thresholds were not met for any target organization."
             )
         elif self._use_llm():
             try:
-                combined = "\n\n".join([
-                    f"[{self.network.org_names.get(oid, oid)}]\n{ans}"
-                    for oid, ans in org_answers.items()
-                ])
+                parts: list[str] = []
+                if org_answers:
+                    parts.append(
+                        "\n\n".join([
+                            f"[{self.network.org_names.get(oid, oid)}]\n{ans}"
+                            for oid, ans in org_answers.items()
+                        ])
+                    )
+                if org_denials:
+                    deny_lines = "\n".join([
+                        f"[{self.network.org_names.get(oid, oid)}] — {reason}"
+                        for oid, reason in org_denials.items()
+                    ])
+                    parts.append(f"Organizations that could not contribute:\n{deny_lines}")
+                combined = "\n\n".join(parts)
                 resp = self.llm.invoke([
                     SystemMessage(content=(
                         "You are an enterprise intelligence synthesizer. "
                         "Combine insights from multiple organizations into a "
                         "clear, structured answer. Cite which organization "
-                        "provided each insight."
+                        "provided each insight. If some partners could not "
+                        "contribute, summarize why briefly without inventing facts."
                     )),
-                    HumanMessage(content=f"Query: {query}\n\nOrg answers:\n{combined}")
+                    HumanMessage(content=f"Query: {query}\n\n{combined}")
                 ])
                 final = resp.content
             except Exception as e:
                 final = f"[Synthesis error: {e}]\n" + "\n".join(org_answers.values())
+                if org_denials:
+                    final += "\n" + "\n".join(
+                        f"{oid}: {r}" for oid, r in org_denials.items()
+                    )
         else:
-            final = "\n\n".join([
+            blocks = [
                 f"**{self.network.org_names.get(oid, oid)}**: {ans}"
                 for oid, ans in org_answers.items()
-            ])
+            ]
+            if org_denials:
+                blocks.extend([
+                    f"**{self.network.org_names.get(oid, oid)}** (no data): {reason}"
+                    for oid, reason in org_denials.items()
+                ])
+            final = "\n\n".join(blocks)
 
         prov.final_answer = final
         prov.sign(
@@ -619,16 +715,19 @@ class IEOTBSMLangGraph:
             raise RuntimeError("LangGraph not installed.")
         return (
             "graph TD\n"
-            "  %% IEOTBSM LangGraph — structural view\n"
+            "  %% IEOTBSM LangGraph — structural view (sequential multi-org)\n"
             "  __start__([START]) --> org_orchestrator[org_orchestrator]\n"
-            "  org_orchestrator --> trust_gate[trust_gate]\n"
+            "  org_orchestrator -->|query_partners| trust_gate[trust_gate]\n"
+            "  org_orchestrator -->|synthesize| synthesizer[synthesizer]\n"
             "  trust_gate -->|approved| boundary_spanner[boundary_spanner]\n"
             "  trust_gate -->|human_review| human_review[human_review]\n"
-            "  trust_gate -->|denied| synthesizer[synthesizer]\n"
+            "  trust_gate -->|denied| advance_org[advance_org]\n"
             "  boundary_spanner --> internal_agent[internal_agent]\n"
-            "  internal_agent --> synthesizer\n"
+            "  internal_agent --> advance_org\n"
             "  human_review -->|approved| boundary_spanner\n"
-            "  human_review -->|denied| synthesizer\n"
+            "  human_review -->|denied| advance_org\n"
+            "  advance_org -->|next_org| trust_gate\n"
+            "  advance_org -->|synthesize| synthesizer\n"
             "  synthesizer --> __end__([END])\n"
         )
 
@@ -639,11 +738,17 @@ class IEOTBSMLangGraph:
         run_name: str | None = None,
         run_tags: list[str] | None = None,
         run_metadata: dict[str, Any] | None = None,
+        stream: bool = False,
+        stream_step: Any | None = None,
     ) -> dict:
         """Execute the graph for a given initial state.
 
         When LangSmith tracing is enabled (LANGSMITH_TRACING + LANGSMITH_API_KEY),
         optional run_name / run_tags / run_metadata appear on the trace for filtering.
+
+        If ``stream`` is True, runs ``graph.stream`` with ``stream_mode="values"`` and
+        calls ``stream_step(step_index, snapshot)`` after each superstep; returns the
+        last accumulated state.
         """
         if not LANGGRAPH_AVAILABLE:
             raise RuntimeError("LangGraph not installed.")
@@ -654,6 +759,16 @@ class IEOTBSMLangGraph:
             config["tags"] = run_tags
         if run_metadata:
             config["metadata"] = run_metadata
+        cfg = config if config else {}
+        if stream:
+            last: dict[str, Any] = dict(state)
+            for i, snapshot in enumerate(
+                self.graph.stream(state, config=cfg, stream_mode="values")
+            ):
+                last = snapshot
+                if stream_step is not None:
+                    stream_step(i, snapshot)
+            return last
         if config:
             return self.graph.invoke(state, config=config)
         return self.graph.invoke(state)

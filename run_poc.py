@@ -19,6 +19,10 @@ Usage (LangGraph + LangSmith tracing — graph/steps in the Smith UI):
     export LANGSMITH_API_KEY=lsv2_...
     python3 run_poc.py --langgraph --langsmith
 
+Usage (pick demo preset + stream graph state each superstep):
+    python3 run_poc.py --langgraph --demo-id vault_seven --stream
+    python3 run_poc.py --langgraph --llm ollama --demo-index 2 --stream
+
 Based on: Hexmoor, Wilson & Bhattaram (2006)
 The Knowledge Engineering Review, 21(2), 127-161.
 
@@ -262,6 +266,40 @@ def run_simulation_mode(args):
     return network, all_results
 
 
+def _print_langgraph_stream_step(step: int, snap: dict) -> None:
+    """One-line summary for ``stream_mode=\"values\"`` snapshots."""
+    targets = snap.get("target_org_ids") or []
+    cur = snap.get("current_target_org") or "—"
+    idx = snap.get("fanout_org_idx", 0)
+    oa = snap.get("org_answers") or {}
+    od = snap.get("org_denials") or {}
+    fa = (snap.get("final_answer") or "").strip()
+    preview = (fa[:100] + "…") if len(fa) > 100 else (fa or "—")
+    print(
+        f"  [stream {step}] partners={len(targets)} fanout_idx={idx} "
+        f"current={cur} answers={list(oa.keys())} denials={list(od.keys())}"
+    )
+    if fa:
+        print(f"            └─ {preview}")
+
+
+def resolve_langgraph_demo(args) -> dict:
+    """Resolve ``DEMO_QUERIES`` entry from ``--demo-id`` or ``--demo-index``."""
+    if getattr(args, "demo_id", None) is not None:
+        for d in DEMO_QUERIES:
+            if d["id"] == args.demo_id:
+                return d
+        print("❌ Unknown --demo-id. Valid ids:")
+        for d in DEMO_QUERIES:
+            print(f"     {d['id']}")
+        sys.exit(1)
+    idx = args.demo_index if args.demo_index is not None else 0
+    if idx < 0 or idx >= len(DEMO_QUERIES):
+        print(f"❌ --demo-index must be between 0 and {len(DEMO_QUERIES) - 1}.")
+        sys.exit(1)
+    return DEMO_QUERIES[idx]
+
+
 def run_langgraph_mode(args):
     """Run PoC with actual LangGraph + LLM (Claude or local Ollama)."""
     try:
@@ -300,6 +338,8 @@ def run_langgraph_mode(args):
     print(f"  Mode: LANGGRAPH + {backend_label}")
     if args.model:
         print(f"  Model: {args.model}")
+    if args.stream:
+        print("  Stream: on (full state after each superstep)")
     print()
 
     network = IEOTBSMAgenticNetwork(
@@ -322,7 +362,7 @@ def run_langgraph_mode(args):
         print_separator()
         print()
 
-    demo = DEMO_QUERIES[0]
+    demo = resolve_langgraph_demo(args)
     prov = __import__("trust_engine", fromlist=["QueryProvenance"]).QueryProvenance(
         query_text=demo["query"],
         sensitivity=demo["sensitivity"],
@@ -342,6 +382,8 @@ def run_langgraph_mode(args):
         "target_org_ids": [],
         "current_target_org": "",
         "org_answers": {},
+        "org_denials": {},
+        "fanout_org_idx": 0,
         "human_review_queue": [],
         "pending_violation": None,
         "final_answer": "",
@@ -353,19 +395,31 @@ def run_langgraph_mode(args):
         print(f"  project '{os.getenv('LANGSMITH_PROJECT', 'default')}' for this run.")
         print()
 
+    print(f"  Demo: {demo.get('title', demo['id'])} ({demo['id']})")
     print(f"  Executing query via LangGraph: {demo['query'][:60]}...")
+    if args.stream:
+        print_separator("·")
+
+    run_kwargs: dict = {}
     if args.langsmith:
-        result_state = graph_engine.run(
-            initial_state,
+        run_kwargs.update(
             run_name="IEOTBSM trust-gated RAG",
             run_tags=["ieotbsm", "langgraph", f"llm:{args.llm}"],
             run_metadata={
                 "llm_backend": args.llm,
                 "llm_model": graph_engine.llm_model,
+                "demo_id": demo["id"],
             },
         )
-    else:
-        result_state = graph_engine.run(initial_state)
+    if args.stream:
+        run_kwargs["stream"] = True
+        run_kwargs["stream_step"] = _print_langgraph_stream_step
+
+    result_state = graph_engine.run(initial_state, **run_kwargs)
+
+    if args.stream:
+        print_separator("·")
+        print()
 
     print()
     print("  FINAL ANSWER:")
@@ -415,6 +469,25 @@ def parse_args():
         action="store_true",
         help="With --langgraph, print the graph as Mermaid text before running",
     )
+    demo_grp = p.add_mutually_exclusive_group()
+    demo_grp.add_argument(
+        "--demo-id",
+        metavar="ID",
+        default=None,
+        help="With --langgraph, demo preset id (e.g. silicon_ledger, vault_seven)",
+    )
+    demo_grp.add_argument(
+        "--demo-index",
+        type=int,
+        default=None,
+        metavar="N",
+        help="With --langgraph, demo preset by index (0 .. n-1; default 0 if omitted)",
+    )
+    p.add_argument(
+        "--stream",
+        action="store_true",
+        help="With --langgraph, print accumulated state after each graph superstep",
+    )
     p.add_argument("--tpm", type=int, default=4, choices=[1, 2, 3, 4],
                    help="Trust policy model (4=human review, default)")
     p.add_argument("--alpha", type=float, default=0.65,
@@ -431,6 +504,9 @@ if __name__ == "__main__":
         sys.exit(1)
     if args.print_graph_mermaid and not args.langgraph:
         print("❌ --print-graph-mermaid requires --langgraph.")
+        sys.exit(1)
+    if args.stream and not args.langgraph:
+        print("❌ --stream requires --langgraph.")
         sys.exit(1)
     if args.langgraph:
         if args.llm == "claude" and not os.getenv("ANTHROPIC_API_KEY"):

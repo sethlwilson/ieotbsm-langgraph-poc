@@ -1,0 +1,131 @@
+classDiagram
+
+class GraphState {
+    <<state_dict>>
+    +String query_id
+    +String query_text
+    +SensitivityLevel sensitivity
+    +String requesting_org_id
+    +String requesting_agent_id
+    +QueryProvenance provenance
+    +boolean trust_passed
+    +float trust_value
+    +List target_org_ids
+    +String current_target_org
+    +Map org_answers
+    +List human_review_queue
+    +TrustViolation pending_violation
+    +String final_answer
+    +Map metrics
+}
+
+class IEOTBSMLangGraph {
+    +IEOTBSMAgenticNetwork network
+    +String llm_backend
+    +Object llm
+    +String llm_model
+    +String ollama_base_url
+    +Object graph
+    +use_llm()
+    +build_graph()
+    +org_orchestrator_node()
+    +trust_gate_node()
+    +trust_gate_router()
+    +human_review_node()
+    +human_review_router()
+    +boundary_spanner_node()
+    +internal_agent_node()
+    +synthesizer_node()
+    +graph_mermaid()
+    +run()
+}
+
+class ORG_KNOWLEDGE_BASE {
+    <<module_constant>>
+    +Map org_to_docs
+}
+
+class retrieve_from_org {
+    <<function>>
+    +String module_note
+}
+
+class StateGraph {
+    <<langgraph_optional>>
+}
+
+class CompiledGraph {
+    <<langgraph_optional>>
+    +invoke()
+}
+
+class ChatAnthropic {
+    <<langchain_optional>>
+}
+
+class ChatOllama {
+    <<langchain_optional>>
+}
+
+class IEOTBSMAgenticNetwork {
+    <<network>>
+}
+
+class QueryProvenance {
+    <<trust_engine>>
+}
+
+class TrustViolation {
+    <<trust_engine>>
+}
+
+class ViolationType {
+    <<trust_engine>>
+}
+
+class SensitivityLevel {
+    <<trust_engine>>
+}
+
+class AgentRole {
+    <<trust_engine>>
+}
+
+class TrustGate {
+    <<trust_engine>>
+}
+
+class AgenticTPM {
+    <<trust_engine>>
+}
+
+GraphState ..> QueryProvenance : provenance
+GraphState ..> SensitivityLevel : sensitivity
+GraphState ..> TrustViolation : violations
+
+IEOTBSMLangGraph *-- IEOTBSMAgenticNetwork : network
+IEOTBSMLangGraph o-- ChatAnthropic : llm claude
+IEOTBSMLangGraph o-- ChatOllama : llm ollama
+IEOTBSMLangGraph *-- CompiledGraph : graph
+IEOTBSMLangGraph ..> StateGraph : build
+StateGraph ..> CompiledGraph : compile
+
+IEOTBSMLangGraph ..> GraphState : nodes
+IEOTBSMLangGraph ..> QueryProvenance : nodes
+IEOTBSMLangGraph ..> TrustViolation : trust human_review
+IEOTBSMLangGraph ..> ViolationType : violation
+IEOTBSMLangGraph ..> SensitivityLevel : routing
+IEOTBSMLangGraph ..> AgentRole : sign
+
+IEOTBSMLangGraph ..> TrustGate : network gate
+IEOTBSMLangGraph ..> AgenticTPM : network tpm
+
+IEOTBSMAgenticNetwork ..> TrustGate
+IEOTBSMAgenticNetwork ..> AgenticTPM
+
+retrieve_from_org ..> ORG_KNOWLEDGE_BASE : KB
+retrieve_from_org ..> SensitivityLevel : filter
+
+IEOTBSMLangGraph ..> retrieve_from_org : internal_agent
+
+note for retrieve_from_org "retrieve_from_org org_id query max_sensitivity returns List of doc dicts"
