@@ -1,10 +1,14 @@
 from fastapi import Header, HTTPException
 
-from trust_api.config import settings
+
+def _settings():
+    from trust_api.config import settings as s
+
+    return s
 
 
 def verify_api_key(x_api_key: str | None = Header(None)) -> None:
-    expected = settings.api_key
+    expected = _settings().api_key
     if not expected:
         return
     if not x_api_key or x_api_key != expected:
@@ -12,4 +16,5 @@ def verify_api_key(x_api_key: str | None = Header(None)) -> None:
 
 
 def tenant_id(x_tenant_id: str | None = Header(None, alias="X-Tenant-ID")) -> str:
-    return (x_tenant_id or settings.default_tenant).strip() or settings.default_tenant
+    s = _settings()
+    return (x_tenant_id or s.default_tenant).strip() or s.default_tenant

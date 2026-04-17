@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import base64
 import threading
 import uuid
 from collections import defaultdict
+from typing import Any
 
 from sqlalchemy.orm import Session, sessionmaker
 
 from ieotbsm_core import AgentRole, SensitivityLevel
+from ieotbsm_core.pedigree_chain import (
+    link_digest,
+    payload_digest,
+    prev_root_from_row,
+    sign_link_digest,
+)
 from ieotbsm_core.provenance_persist import provenance_from_dict, provenance_to_dict
 from ieotbsm_core.schemas import (
     GateDecisionV1,
@@ -19,15 +27,29 @@ from ieotbsm_core.schemas import (
 )
 from trust_api.db import RunRow, TenantStateRow
 from trust_api.repo_path import ensure_repo_root
+from trust_api.config import Settings
+from trust_api.signing import jwks_document, load_signing_private_key
 
 ensure_repo_root()
 from network import IEOTBSMAgenticNetwork  # noqa: E402
 
 
 class TrustApiService:
-    def __init__(self, session_factory: sessionmaker[Session]):
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        *,
+        api_settings: Settings | None = None,
+    ):
+        from trust_api.config import settings as default_settings
+
+        self._settings = api_settings or default_settings
         self._session_factory = session_factory
         self._locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
+        self._signing_key = load_signing_private_key(self._settings)
+
+    def jwks_public(self) -> dict[str, Any]:
+        return jwks_document(self._settings, self._signing_key)
 
     def _session(self) -> Session:
         return self._session_factory()
@@ -259,24 +281,93 @@ class TrustApiService:
         self, tenant_id: str, run_id: str, event_type: str, payload: dict
     ) -> dict[str, object]:
         with self._locks[tenant_id]:
-            prov = provenance_from_dict(self._get_run(tenant_id, run_id))
-            if event_type == "pedigree_sign":
-                prov.sign(
-                    payload["agent_id"],
-                    payload["org_id"],
-                    AgentRole(payload["role"]),
-                    payload["action"],
+            with self._session() as s:
+                row = s.get(RunRow, run_id)
+                if row is None or row.tenant_id != tenant_id:
+                    raise KeyError("run not found")
+                prov = provenance_from_dict(dict(row.provenance))
+                if event_type == "pedigree_sign":
+                    prov.sign(
+                        payload["agent_id"],
+                        payload["org_id"],
+                        AgentRole(payload["role"]),
+                        payload["action"],
+                    )
+                elif event_type == "context":
+                    prov.add_context(
+                        payload["org_id"],
+                        payload["agent_id"],
+                        payload["content"],
+                        SensitivityLevel(int(payload["sensitivity"])),
+                    )
+                prov_dict = provenance_to_dict(prov)
+                ph = payload_digest(dict(payload))
+                prev = prev_root_from_row(row.chain_seq, row.chain_root_b64)
+                next_seq = row.chain_seq + 1
+                ld = link_digest(
+                    run_id=run_id,
+                    tenant_id=tenant_id,
+                    seq=next_seq,
+                    event_type=event_type,
+                    payload_hash=ph,
+                    prev_root=prev,
                 )
-            elif event_type == "context":
-                prov.add_context(
-                    payload["org_id"],
-                    payload["agent_id"],
-                    payload["content"],
-                    SensitivityLevel(int(payload["sensitivity"])),
+                sig = sign_link_digest(self._signing_key, ld)
+                row.provenance = prov_dict
+                row.chain_seq = next_seq
+                row.chain_root_b64 = base64.standard_b64encode(ld).decode(
+                    "ascii"
                 )
-            self._save_run_prov(tenant_id, run_id, provenance_to_dict(prov))
-            qid = prov.query_id
-        return {"ok": True, "query_id": qid}
+                row.chain_sig_b64 = base64.standard_b64encode(sig).decode("ascii")
+                row.chain_key_id = self._settings.signing_key_id
+                s.commit()
+                qid = prov.query_id
+                out_chain_root = row.chain_root_b64
+                out_chain_sig = row.chain_sig_b64
+                out_chain_key_id = row.chain_key_id
+        return {
+            "ok": True,
+            "query_id": qid,
+            "chain_seq": next_seq,
+            "chain_root_b64": out_chain_root,
+            "chain_signature_b64": out_chain_sig,
+            "chain_key_id": out_chain_key_id,
+        }
+
+    def get_pedigree_chain_head(self, tenant_id: str, run_id: str) -> dict[str, Any]:
+        with self._locks[tenant_id]:
+            with self._session() as s:
+                row = s.get(RunRow, run_id)
+                if row is None or row.tenant_id != tenant_id:
+                    raise KeyError("run not found")
+                return {
+                    "schema_version": 1,
+                    "run_id": run_id,
+                    "tenant_id": tenant_id,
+                    "seq": row.chain_seq,
+                    "root_b64": row.chain_root_b64 or "",
+                    "signature_b64": row.chain_sig_b64 or "",
+                    "key_id": row.chain_key_id or "",
+                }
+
+    def get_run_snapshot(self, tenant_id: str, run_id: str) -> dict[str, Any]:
+        """Provenance JSON + chain head for A2A/introspection."""
+        with self._locks[tenant_id]:
+            with self._session() as s:
+                row = s.get(RunRow, run_id)
+                if row is None or row.tenant_id != tenant_id:
+                    raise KeyError("run not found")
+                prov = dict(row.provenance)
+                chain = {
+                    "schema_version": 1,
+                    "run_id": run_id,
+                    "tenant_id": tenant_id,
+                    "seq": row.chain_seq,
+                    "root_b64": row.chain_root_b64 or "",
+                    "signature_b64": row.chain_sig_b64 or "",
+                    "key_id": row.chain_key_id or "",
+                }
+        return {"provenance": prov, "pedigree_chain": chain}
 
     def patch_violation(
         self,

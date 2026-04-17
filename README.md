@@ -32,8 +32,8 @@ These terms match the paper’s spirit; see the article for formal definitions.
 | [`run_poc.py`](run_poc.py) | CLI: full **simulation** (six scripted demos) or **LangGraph + LLM** |
 | [`dashboard_app.py`](dashboard_app.py) | **FastAPI** app: REST + **Server-Sent Events** live simulation UI |
 | [`static/`](static/) | Dashboard HTML/CSS/JS |
-| [`packages/ieotbsm_core/`](packages/ieotbsm_core/) | Installable trust core (`pip install -e ./packages/ieotbsm_core`) |
-| [`services/trust_api/`](services/trust_api/) | Trust HTTP service (OpenAPI `/docs`, Postgres/SQLite) |
+| [`packages/ieotbsm_core/`](packages/ieotbsm_core/) | Installable trust core (`pip install -e ./packages/ieotbsm_core`): ledger, gates, TPM, **RFC 8785 + Ed25519 pedigree chain** primitives ([`pedigree_chain`](packages/ieotbsm_core/src/ieotbsm_core/pedigree_chain.py)) |
+| [`services/trust_api/`](services/trust_api/) | Trust HTTP service (OpenAPI `/docs`, Postgres/SQLite), **A2A Agent Card** + **JSON-RPC** (`/v2/a2a`), **JWKS**, **signed append-only pedigree** per run |
 | [`services/trust_mcp/`](services/trust_mcp/) | MCP stdio server exposing Trust API tools |
 | [`adapters/langgraph_ieotbsm/`](adapters/langgraph_ieotbsm/) | LangGraph ↔ HTTP trust client |
 
@@ -46,13 +46,17 @@ These terms match the paper’s spirit; see the article for formal definitions.
    uvicorn trust_api.main:app --host 127.0.0.1 --port 8088
    ```
 
-   Override DB: `TRUST_API_DATABASE_URL=postgresql+psycopg2://user:pass@host/db` (install `psycopg2-binary` alongside the service). API key header matches `TRUST_API_API_KEY` (default `dev-key`).
+   Override DB: `TRUST_API_DATABASE_URL=postgresql+psycopg2://user:pass@host/db` (install `psycopg2-binary` alongside the service). API key header matches `TRUST_API_API_KEY` (default `dev-key`). Tenant scoping: `X-Tenant-ID` (default from `TRUST_API_DEFAULT_TENANT`).
 
-3. LangGraph with remote gate: start the API, then e.g. `IEOTBSM_TRUST_API_URL=http://127.0.0.1:8088 python3 run_poc.py --langgraph --llm ollama --trust-backend http`
+3. **Provenance / pedigree chain (service-attested)** — Each `POST /v1/runs/{run_id}/events` append extends an **Ed25519-signed hash chain** (RFC 8785 canonical payloads; see `ieotbsm_core.pedigree_chain`). Inspect the head with **`GET /v1/runs/{run_id}/pedigree/chain`** or the full snapshot with **`GET /v1/runs/{run_id}`**. **`GET /.well-known/jwks.json`** publishes the verifying key (`kid` = `TRUST_API_SIGNING_KEY_ID`). For production, set **`TRUST_API_SIGNING_PRIVATE_KEY_PEM`** (PKCS8 PEM, Ed25519); if unset, a **deterministic dev-only** key is derived from the API key (fine for local tests, not for multi-host audit).
 
-4. MCP (stdio): with API running, configure your host with command `python -m trust_mcp.server` from `services/trust_mcp` on `PYTHONPATH`, or `trust-mcp` after `pip install -e ./services/trust_mcp`. Set `TRUST_API_BASE_URL`, `TRUST_API_KEY`, `TRUST_API_TENANT` as needed.
+4. **A2A (Agent2Agent)** — Discovery: **`GET /.well-known/agent-card.json`** (alias **`GET /card`**) with `ETag` / `Cache-Control`. Agents call **`POST /v2/a2a`** with JSON-RPC 2.0 body and header **`A2A-Version: 1.0`** or **`1.0.0`** (same `X-API-Key` / `X-Tenant-ID` as REST). Methods include `trust/createRun`, `trust/getRun`, `trust/appendEvent`, `trust/evaluateGate`, plus `tasks/send` / `tasks/get` with skill ids such as `trust.create_run`. Set **`TRUST_API_PUBLIC_BASE_URL`** so the Agent Card’s interface URLs match your deployment (default `http://127.0.0.1:8088`).
 
-5. Dashboard backed by API: `DASHBOARD_TRUST_API_URL=http://127.0.0.1:8088 uvicorn dashboard_app:app --port 8765` (optional `DASHBOARD_TRUST_API_KEY`). Omit the env var to keep the original in-memory dashboard.
+5. LangGraph with remote gate: start the API, then e.g. `IEOTBSM_TRUST_API_URL=http://127.0.0.1:8088 python3 run_poc.py --langgraph --llm ollama --trust-backend http`
+
+6. MCP (stdio): with API running, configure your host with command `python -m trust_mcp.server` from `services/trust_mcp` on `PYTHONPATH`, or `trust-mcp` after `pip install -e ./services/trust_mcp`. Set `TRUST_API_BASE_URL`, `TRUST_API_KEY`, `TRUST_API_TENANT` as needed.
+
+7. Dashboard backed by API: `DASHBOARD_TRUST_API_URL=http://127.0.0.1:8088 uvicorn dashboard_app:app --port 8765` (optional `DASHBOARD_TRUST_API_KEY`). Omit the env var to keep the original in-memory dashboard.
 
 ## LangGraph workflow
 
@@ -223,7 +227,7 @@ Simulation and LangGraph runs share the same trust-engine parameters via [`run_p
 The **agentic extension and implementation** in this repository (Python code, dashboard, and related assets) is licensed under the **Business Source License 1.1** (**SPDX: `BUSL-1.1`**). See [`LICENSE`](LICENSE) for the full terms, including:
 
 - **Non-production** use is permitted under the BSL terms; **Additional Use Grant** is currently **None** (see `LICENSE`—adjust with legal advice if you need broader production rights before the Change Date).
-- **Production deployment** of this codebase (including the Trust API/MCP) for external redistribution or SaaS still requires your own **license/legal review** (BSL terms, Additional Use Grant, or a separate agreement with the licensor).
+- **Production deployment** of this codebase (including the Trust API, MCP, A2A endpoints, and signed pedigree machinery) for external redistribution or SaaS still requires your own **license/legal review** (BSL terms, Additional Use Grant, or a separate agreement with the licensor).
 - On **Change Date** **2030-04-04** (or the fourth anniversary of first public distribution of a given version, whichever is earlier), that version of the Licensed Work is additionally licensed under **Apache License, Version 2.0** (the **Change License**).
 - BSL is **not** an OSI-approved open-source license until the Change License applies; plan accordingly for redistribution and production use.
 

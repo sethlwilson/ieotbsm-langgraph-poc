@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import JSONResponse
 
+from trust_api.agent_card import agent_card_etag, build_agent_card
 from trust_api.auth import tenant_id, verify_api_key
-from trust_api.config import settings
 from trust_api.db import make_session_factory
 from trust_api.service import TrustApiService
 
@@ -18,8 +19,10 @@ _service: TrustApiService | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _session_factory, _service
-    _session_factory = make_session_factory(settings.database_url)
-    _service = TrustApiService(_session_factory)
+    from trust_api.config import settings as s
+
+    _session_factory = make_session_factory(s.database_url)
+    _service = TrustApiService(_session_factory, api_settings=s)
     yield
 
 
@@ -39,6 +42,35 @@ def get_service() -> TrustApiService:
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+def _agent_card_response() -> JSONResponse:
+    from trust_api.config import settings as s
+
+    card = build_agent_card(s)
+    etag = agent_card_etag(card)
+    return JSONResponse(
+        content=card,
+        headers={
+            "Cache-Control": "public, max-age=300",
+            "ETag": f'W/"{etag}"',
+        },
+    )
+
+
+@app.get("/.well-known/jwks.json")
+def well_known_jwks():
+    return get_service().jwks_public()
+
+
+@app.get("/.well-known/agent-card.json")
+def well_known_agent_card():
+    return _agent_card_response()
+
+
+@app.get("/card")
+def agent_card_alias():
+    return _agent_card_response()
 
 
 @app.post("/v1/admin/seed", dependencies=[Depends(verify_api_key)])
@@ -139,6 +171,41 @@ def v1_events(run_id: str, body: dict, tid: str = Depends(tenant_id)):
         )
     except KeyError as e:
         raise HTTPException(404, str(e)) from e
+
+
+@app.get(
+    "/v1/runs/{run_id}/pedigree/chain",
+    dependencies=[Depends(verify_api_key)],
+)
+def v1_pedigree_chain(run_id: str, tid: str = Depends(tenant_id)):
+    try:
+        return get_service().get_pedigree_chain_head(tid, run_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@app.get("/v1/runs/{run_id}", dependencies=[Depends(verify_api_key)])
+def v1_get_run(run_id: str, tid: str = Depends(tenant_id)):
+    try:
+        return get_service().get_run_snapshot(tid, run_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@app.post("/v2/a2a", dependencies=[Depends(verify_api_key)])
+def v2_a2a_jsonrpc(
+    body: dict,
+    tid: str = Depends(tenant_id),
+    a2a_version: str | None = Header(None, alias="A2A-Version"),
+):
+    from trust_api.a2a_rpc import handle_a2a_jsonrpc
+
+    return handle_a2a_jsonrpc(
+        body,
+        service=get_service(),
+        tenant_id=tid,
+        a2a_version=a2a_version,
+    )
 
 
 @app.patch("/v1/violations/{violation_id}", dependencies=[Depends(verify_api_key)])
