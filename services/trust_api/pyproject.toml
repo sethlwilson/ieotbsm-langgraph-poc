@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trust-api"
+version = "0.1.0"
+description = "HTTP trust service for IEOTBSM (runs, gate, ledger, violations)"
+requires-python = ">=3.10"
+dependencies = [
+    "ieotbsm-core",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "sqlalchemy>=2.0",
+    "pydantic-settings>=2.0",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg2-binary>=2.9"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[project.scripts]
+trust-api = "trust_api.main:run"

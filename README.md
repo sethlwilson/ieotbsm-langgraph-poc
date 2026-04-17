@@ -32,6 +32,27 @@ These terms match the paper’s spirit; see the article for formal definitions.
 | [`run_poc.py`](run_poc.py) | CLI: full **simulation** (six scripted demos) or **LangGraph + LLM** |
 | [`dashboard_app.py`](dashboard_app.py) | **FastAPI** app: REST + **Server-Sent Events** live simulation UI |
 | [`static/`](static/) | Dashboard HTML/CSS/JS |
+| [`packages/ieotbsm_core/`](packages/ieotbsm_core/) | Installable trust core (`pip install -e ./packages/ieotbsm_core`) |
+| [`services/trust_api/`](services/trust_api/) | Trust HTTP service (OpenAPI `/docs`, Postgres/SQLite) |
+| [`services/trust_mcp/`](services/trust_mcp/) | MCP stdio server exposing Trust API tools |
+| [`adapters/langgraph_ieotbsm/`](adapters/langgraph_ieotbsm/) | LangGraph ↔ HTTP trust client |
+
+### Trust API and MCP (quick start)
+
+1. Install deps: `pip install -r requirements.txt`
+2. Run API (SQLite file `./trust_service.db` by default):
+
+   ```bash
+   uvicorn trust_api.main:app --host 127.0.0.1 --port 8088
+   ```
+
+   Override DB: `TRUST_API_DATABASE_URL=postgresql+psycopg2://user:pass@host/db` (install `psycopg2-binary` alongside the service). API key header matches `TRUST_API_API_KEY` (default `dev-key`).
+
+3. LangGraph with remote gate: start the API, then e.g. `IEOTBSM_TRUST_API_URL=http://127.0.0.1:8088 python3 run_poc.py --langgraph --llm ollama --trust-backend http`
+
+4. MCP (stdio): with API running, configure your host with command `python -m trust_mcp.server` from `services/trust_mcp` on `PYTHONPATH`, or `trust-mcp` after `pip install -e ./services/trust_mcp`. Set `TRUST_API_BASE_URL`, `TRUST_API_KEY`, `TRUST_API_TENANT` as needed.
+
+5. Dashboard backed by API: `DASHBOARD_TRUST_API_URL=http://127.0.0.1:8088 uvicorn dashboard_app:app --port 8765` (optional `DASHBOARD_TRUST_API_KEY`). Omit the env var to keep the original in-memory dashboard.
 
 ## LangGraph workflow
 
@@ -202,6 +223,7 @@ Simulation and LangGraph runs share the same trust-engine parameters via [`run_p
 The **agentic extension and implementation** in this repository (Python code, dashboard, and related assets) is licensed under the **Business Source License 1.1** (**SPDX: `BUSL-1.1`**). See [`LICENSE`](LICENSE) for the full terms, including:
 
 - **Non-production** use is permitted under the BSL terms; **Additional Use Grant** is currently **None** (see `LICENSE`—adjust with legal advice if you need broader production rights before the Change Date).
+- **Production deployment** of this codebase (including the Trust API/MCP) for external redistribution or SaaS still requires your own **license/legal review** (BSL terms, Additional Use Grant, or a separate agreement with the licensor).
 - On **Change Date** **2030-04-04** (or the fourth anniversary of first public distribution of a given version, whichever is earlier), that version of the Licensed Work is additionally licensed under **Apache License, Version 2.0** (the **Change License**).
 - BSL is **not** an OSI-approved open-source license until the Change License applies; plan accordingly for redistribution and production use.
 

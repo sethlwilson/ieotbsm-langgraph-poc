@@ -65,11 +65,20 @@ except ImportError:
     OLLAMA_AVAILABLE = False
     ChatOllama = None  # type: ignore[misc, assignment]
 
-from trust_engine import (
-    AgentIdentity, AgentRole, AgentTrustState, QueryProvenance,
-    TrustViolation, ViolationType, SensitivityLevel,
-    InterOrgTrustLedger, AgenticTPM, TrustGate, TrustMetrics
+from ieotbsm_core import (
+    AgentIdentity,
+    AgentRole,
+    AgentTrustState,
+    AgenticTPM,
+    InterOrgTrustLedger,
+    QueryProvenance,
+    SensitivityLevel,
+    TrustGate,
+    TrustMetrics,
+    TrustViolation,
+    ViolationType,
 )
+from ieotbsm_core.knowledge import ORG_KNOWLEDGE_BASE, retrieve_from_org
 
 
 # ─────────────────────────────────────────────────────────────
@@ -113,56 +122,7 @@ class GraphState(dict):
     metrics: dict
 
 
-# ─────────────────────────────────────────────────────────────
-# Knowledge base (simulated RAG per org)
-# ─────────────────────────────────────────────────────────────
-
-ORG_KNOWLEDGE_BASE: dict[str, list[dict]] = {
-    "org_0": [  # Acme Corp — market intelligence
-        {"topic": "market", "content": "Q3 semiconductor demand up 18% YoY. DRAM spot prices stabilizing at $3.20/GB. Key driver: AI accelerator procurement by hyperscalers.", "sensitivity": SensitivityLevel.INTERNAL},
-        {"topic": "competitor", "content": "Competitor X launching new edge AI chip Q1 next year. Performance claims: 45 TOPS at 8W. Supply chain: TSMC 3nm.", "sensitivity": SensitivityLevel.CONFIDENTIAL},
-    ],
-    "org_1": [  # Nexus Labs — threat intelligence
-        {"topic": "threat", "content": "APT-41 campaign targeting supply chain APIs. IOCs: 203.0.113.42, malware hash a3f2c1d9. Affected sectors: semiconductor, defense.", "sensitivity": SensitivityLevel.RESTRICTED},
-        {"topic": "vulnerability", "content": "CVE-2024-38112 actively exploited in enterprise VPN appliances. Patch available. CVSS 9.8. Recommend immediate patching.", "sensitivity": SensitivityLevel.CONFIDENTIAL},
-    ],
-    "org_2": [  # Sentinel AI — regulatory
-        {"topic": "regulatory", "content": "EU AI Act enforcement begins August 2026. High-risk AI systems require conformity assessment. Fines up to 3% global revenue.", "sensitivity": SensitivityLevel.INTERNAL},
-        {"topic": "compliance", "content": "SOC 2 Type II audit findings: 2 minor exceptions in access control logging. Remediation deadline: 30 days.", "sensitivity": SensitivityLevel.CONFIDENTIAL},
-    ],
-    "org_3": [  # Vertex Systems — supply chain
-        {"topic": "supply_chain", "content": "TSMC CoWoS packaging capacity constrained through Q2 2026. Lead times extending to 52 weeks for advanced packaging.", "sensitivity": SensitivityLevel.INTERNAL},
-        {"topic": "vendor", "content": "Tier-2 supplier risk: 3 vendors flagged for single-source dependency. Recommended: dual-source qualification for capacitors.", "sensitivity": SensitivityLevel.CONFIDENTIAL},
-    ],
-    "org_4": [  # Orionis Data — pricing/benchmarks
-        {"topic": "pricing", "content": "Cloud GPU pricing: H100 $2.80/hr spot, $3.40/hr on-demand. Utilization rates: 94% across top-3 hyperscalers.", "sensitivity": SensitivityLevel.INTERNAL},
-        {"topic": "benchmark", "content": "Internal LLM benchmark: Model A scores 87.3 on MMLU, 72.1 on HumanEval. Inference latency: 43ms p50, 210ms p99.", "sensitivity": SensitivityLevel.INTERNAL},
-    ],
-    "org_5": [  # Caldwell Group — workforce
-        {"topic": "workforce", "content": "AI talent attrition rate: 23% annually at director level. Compensation benchmarks: ML Engineer median $195k TC in SF.", "sensitivity": SensitivityLevel.CONFIDENTIAL},
-        {"topic": "hiring", "content": "Pipeline analysis: 340 active ML roles across portfolio. Time-to-fill averaging 94 days. Top source: university partnerships.", "sensitivity": SensitivityLevel.INTERNAL},
-    ],
-}
-
-
-def retrieve_from_org(org_id: str, query: str,
-                      max_sensitivity: SensitivityLevel) -> list[dict]:
-    """
-    Simulated RAG retrieval from an org's knowledge base.
-    Filters results by sensitivity level (trust-gated access).
-    In production: replace with vector DB retrieval (FAISS, Chroma, etc.)
-    """
-    kb = ORG_KNOWLEDGE_BASE.get(org_id, [])
-    results = []
-    for doc in kb:
-        # Only return docs at or below the permitted sensitivity level
-        if doc["sensitivity"].value <= max_sensitivity.value:
-            # Simple keyword match (replace with embedding similarity in production)
-            query_lower = query.lower()
-            if any(word in doc["content"].lower()
-                   for word in query_lower.split() if len(word) > 3):
-                results.append(doc)
-    return results
+# Simulated RAG: ORG_KNOWLEDGE_BASE and retrieve_from_org live in ieotbsm_core.knowledge
 
 
 # ─────────────────────────────────────────────────────────────
@@ -195,8 +155,10 @@ class IEOTBSMLangGraph:
         llm_backend: str = "claude",
         llm_model: str | None = None,
         ollama_base_url: str | None = None,
+        trust_api_client: Any | None = None,
     ):
         self.network = network
+        self._trust_api = trust_api_client
         self.llm_backend = (llm_backend or "claude").lower().strip()
         self.llm: Any = None
         self.ollama_base_url = (
@@ -332,7 +294,7 @@ class IEOTBSMLangGraph:
             except Exception:
                 pass
 
-        return {
+        out = {
             **state,
             "target_org_ids": target_orgs,
             "current_target_org": target_orgs[0] if target_orgs else "",
@@ -341,6 +303,17 @@ class IEOTBSMLangGraph:
             "fanout_org_idx": 0,
             "provenance": prov,
         }
+        if self._trust_api is not None:
+            sens = prov.sensitivity
+            s_val = sens.value if isinstance(sens, SensitivityLevel) else int(sens)
+            cr = self._trust_api.create_run(
+                state["query_text"],
+                requesting_org,
+                state["requesting_agent_id"],
+                s_val,
+            )
+            out["trust_run_id"] = cr["run_id"]
+        return out
 
     def _orchestrator_fanout_router(self, state: dict) -> str:
         """Skip the per-org loop when there are no partner orgs to query."""
@@ -361,42 +334,84 @@ class IEOTBSMLangGraph:
         sensitivity = prov.sensitivity
 
         if not target_org:
-            return {**state, "trust_passed": False, "trust_value": 0.0,
-                    "pending_violation": None}
+            return {
+                **state,
+                "trust_passed": False,
+                "trust_value": 0.0,
+                "pending_violation": None,
+                "trust_remote_decision": None,
+            }
 
-        # Get boundary spanner pair
         req_bs = self.network.get_boundary_spanner(requesting_org)
         tgt_bs = self.network.get_boundary_spanner(target_org)
+        remote_decision: str | None = None
 
-        if req_bs and tgt_bs:
+        if self._trust_api is not None:
+            run_id = state.get("trust_run_id") or ""
+            if not run_id:
+                raise RuntimeError("trust_run_id missing — orchestrator must create a run")
+            sens_val = (
+                sensitivity.value
+                if isinstance(sensitivity, SensitivityLevel)
+                else int(sensitivity)
+            )
+            resp = self._trust_api.evaluate_gate(
+                run_id,
+                requesting_org,
+                target_org,
+                req_bs.agent_id if req_bs else None,
+                tgt_bs.agent_id if tgt_bs else None,
+                sens_val,
+                commit=True,
+            )
+            dec = resp["decision"]["decision"]
+            remote_decision = dec
+            passed = dec == "allow"
+            effective_trust = float(resp["decision"]["trust_value"])
+            threshold = float(resp["decision"]["threshold"])
+            self._trust_api.sync_network(self.network)
+        elif req_bs and tgt_bs:
             passed, effective_trust = self.network.gate.check_inter_org(
                 trustor_agent_id=req_bs.agent_id,
                 trustee_agent_id=tgt_bs.agent_id,
                 org_id=requesting_org,
                 partner_org_id=target_org,
                 sensitivity=sensitivity,
-                provenance=prov
+                provenance=prov,
             )
+            threshold = self.network.ledger.threshold_for(sensitivity)
         else:
-            # Fall back to pure inter-org trust
             passed, effective_trust, threshold = self.network.ledger.check(
-                requesting_org, target_org, sensitivity)
+                requesting_org, target_org, sensitivity
+            )
 
         violation = None
-        threshold = self.network.ledger.threshold_for(sensitivity)
         if not passed:
-            violation = TrustViolation(
-                query_id=prov.query_id,
-                violation_type=ViolationType.INSUFFICIENT_INTER_ORG_TRUST,
-                requesting_org=requesting_org,
-                target_org=target_org,
-                requesting_agent=state["requesting_agent_id"],
-                trust_value=effective_trust,
-                required_threshold=threshold,
-                sensitivity=sensitivity,
-                query_text=state["query_text"],
-                agent_chain_at_violation=list(prov.agent_chain),
-            )
+            vid = None
+            if self._trust_api is not None:
+                vid = resp.get("violation_id")
+                if vid:
+                    violation = next(
+                        (
+                            v
+                            for v in self.network.human_review_queue
+                            if v.violation_id == vid
+                        ),
+                        None,
+                    )
+            if violation is None:
+                violation = TrustViolation(
+                    query_id=prov.query_id,
+                    violation_type=ViolationType.INSUFFICIENT_INTER_ORG_TRUST,
+                    requesting_org=requesting_org,
+                    target_org=target_org,
+                    requesting_agent=state["requesting_agent_id"],
+                    trust_value=effective_trust,
+                    required_threshold=threshold,
+                    sensitivity=sensitivity,
+                    query_text=state["query_text"],
+                    agent_chain_at_violation=list(prov.agent_chain),
+                )
             prov.violations.append(violation.violation_id)
 
         org_denials = dict(state.get("org_denials", {}))
@@ -405,6 +420,7 @@ class IEOTBSMLangGraph:
             not passed
             and target_org
             and violation is not None
+            and remote_decision != "human_required"
             and sensitivity
             not in (SensitivityLevel.CONFIDENTIAL, SensitivityLevel.RESTRICTED)
         ):
@@ -420,12 +436,15 @@ class IEOTBSMLangGraph:
             "pending_violation": violation,
             "org_denials": org_denials,
             "provenance": prov,
+            "trust_remote_decision": remote_decision,
         }
 
     def _trust_gate_router(self, state: dict) -> str:
         """Conditional edge: route based on trust gate result."""
         if state["trust_passed"]:
             return "approved"
+        if state.get("trust_remote_decision") == "human_required":
+            return "human_review"
         violation = state.get("pending_violation")
         if violation and violation.sensitivity in (
                 SensitivityLevel.CONFIDENTIAL, SensitivityLevel.RESTRICTED):
@@ -444,15 +463,15 @@ class IEOTBSMLangGraph:
         violation: TrustViolation = state["pending_violation"]
         prov: QueryProvenance = state["provenance"]
 
-        # Add to network-level human review queue
-        self.network.human_review_queue.append(violation)
-        self.network.tpm.apply(
-            provenance=prov,
-            trust_states=self.network.agent_trust,
-            ledger=self.network.ledger,
-            violation=violation,
-            human_queue=self.network.human_review_queue
-        )
+        if self._trust_api is None:
+            self.network.human_review_queue.append(violation)
+            self.network.tpm.apply(
+                provenance=prov,
+                trust_states=self.network.agent_trust,
+                ledger=self.network.ledger,
+                violation=violation,
+                human_queue=self.network.human_review_queue,
+            )
 
         # Simulate human review decision (in production: async wait)
         # Auto-approve INTERNAL sensitivity violations for PoC demonstration
@@ -501,8 +520,9 @@ class IEOTBSMLangGraph:
                 "current_target_org": targets[idx],
                 "trust_passed": False,
                 "pending_violation": None,
+                "trust_remote_decision": None,
             }
-        return {**state, "fanout_org_idx": idx}
+        return {**state, "fanout_org_idx": idx, "trust_remote_decision": None}
 
     def _advance_org_router(self, state: dict) -> str:
         targets: list[str] = list(state.get("target_org_ids", []))

@@ -40,7 +40,7 @@ import argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from network import IEOTBSMAgenticNetwork
-from trust_engine import SensitivityLevel
+from ieotbsm_core import SensitivityLevel
 
 
 DEMO_QUERIES = [
@@ -336,11 +336,31 @@ def run_langgraph_mode(args):
     print_header()
     backend_label = "CLAUDE API" if args.llm == "claude" else "OLLAMA (local)"
     print(f"  Mode: LANGGRAPH + {backend_label}")
+    if getattr(args, "trust_backend", "local") == "http":
+        print(
+            "  Trust: HTTP service (IEOTBSM_TRUST_API_URL / X-API-Key dev-key default)"
+        )
     if args.model:
         print(f"  Model: {args.model}")
     if args.stream:
         print("  Stream: on (full state after each superstep)")
     print()
+
+    demo = resolve_langgraph_demo(args)
+    from ieotbsm_core import QueryProvenance
+
+    prov = QueryProvenance(
+        query_text=demo["query"],
+        sensitivity=demo["sensitivity"],
+        originating_org=demo["requesting_org"],
+        originating_agent=f"orchestrator_{demo['requesting_org']}",
+    )
+
+    trust_client = None
+    if getattr(args, "trust_backend", "local") == "http":
+        from adapters.langgraph_ieotbsm.http_trust import TrustApiClient
+
+        trust_client = TrustApiClient(base_url=args.trust_api_url)
 
     network = IEOTBSMAgenticNetwork(
         alpha=args.alpha,
@@ -348,11 +368,15 @@ def run_langgraph_mode(args):
         decrement=args.decrement,
     )
 
+    if trust_client is not None:
+        trust_client.put_snapshot(network.export_trust_snapshot())
+
     graph_engine = IEOTBSMLangGraph(
         network,
         llm_backend=args.llm,
         llm_model=args.model,
         ollama_base_url=args.ollama_base_url,
+        trust_api_client=trust_client,
     )
 
     if args.print_graph_mermaid:
@@ -361,14 +385,6 @@ def run_langgraph_mode(args):
         print(graph_engine.graph_mermaid())
         print_separator()
         print()
-
-    demo = resolve_langgraph_demo(args)
-    prov = __import__("trust_engine", fromlist=["QueryProvenance"]).QueryProvenance(
-        query_text=demo["query"],
-        sensitivity=demo["sensitivity"],
-        originating_org=demo["requesting_org"],
-        originating_agent=f"orchestrator_{demo['requesting_org']}",
-    )
 
     initial_state = {
         "query_id": prov.query_id,
@@ -388,6 +404,8 @@ def run_langgraph_mode(args):
         "pending_violation": None,
         "final_answer": "",
         "metrics": {},
+        "trust_run_id": "",
+        "trust_remote_decision": None,
     }
 
     if args.langsmith:
@@ -494,6 +512,17 @@ def parse_args():
                    help="Inter-org trust weight α (default: 0.65)")
     p.add_argument("--decrement", type=float, default=0.06,
                    help="Trust decrement on violation (default: 0.06)")
+    p.add_argument(
+        "--trust-backend",
+        choices=["local", "http"],
+        default="local",
+        help="With --langgraph: local gate (default) or remote Trust API (http)",
+    )
+    p.add_argument(
+        "--trust-api-url",
+        default=None,
+        help="Trust API base URL for --trust-backend http (default IEOTBSM_TRUST_API_URL or http://127.0.0.1:8088)",
+    )
     return p.parse_args()
 
 
@@ -512,6 +541,13 @@ if __name__ == "__main__":
         if args.llm == "claude" and not os.getenv("ANTHROPIC_API_KEY"):
             print("❌ ANTHROPIC_API_KEY not set. Export it or use --llm ollama.")
             sys.exit(1)
+        if args.trust_backend == "http":
+            if not args.trust_api_url and not os.getenv("IEOTBSM_TRUST_API_URL"):
+                print(
+                    "❌ --trust-backend http requires a running Trust API "
+                    "(set IEOTBSM_TRUST_API_URL or pass --trust-api-url)."
+                )
+                sys.exit(1)
         run_langgraph_mode(args)
     else:
         run_simulation_mode(args)

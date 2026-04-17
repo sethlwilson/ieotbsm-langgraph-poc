@@ -21,10 +21,17 @@ from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-from trust_engine import (
-    AgentIdentity, AgentRole, AgentTrustState, QueryProvenance,
-    TrustViolation, SensitivityLevel,
-    InterOrgTrustLedger, AgenticTPM, TrustGate, TrustMetrics
+from ieotbsm_core import (
+    AgentIdentity,
+    AgentRole,
+    AgentTrustState,
+    AgenticTPM,
+    InterOrgTrustLedger,
+    QueryProvenance,
+    SensitivityLevel,
+    TrustGate,
+    TrustMetrics,
+    TrustViolation,
 )
 
 
@@ -85,7 +92,45 @@ class IEOTBSMAgenticNetwork:
         self.metrics_history: list[TrustMetrics] = []
         self.cycle = 0
 
+        self._rng_seed = seed
         self._build_network()
+        self.gate = TrustGate(self.ledger, self.agent_trust)
+
+    def export_trust_snapshot(self) -> dict:
+        """Serializable trust state for persistence (API / DB)."""
+        from ieotbsm_core.agent_trust_persist import agent_trust_to_list
+        from ieotbsm_core.violation_persist import violation_to_dict
+
+        return {
+            "rng_seed": self._rng_seed,
+            "org_configs": self.org_configs,
+            "alpha": self.alpha,
+            "tpm_mode": self.tpm_mode,
+            "decrement": self.tpm.decrement,
+            "cycle": self.cycle,
+            "ledger": self.ledger.to_persistence(),
+            "agent_trust": agent_trust_to_list(self.agent_trust),
+            "tpm": self.tpm.to_persistence(),
+            "human_queue": [violation_to_dict(v) for v in self.human_review_queue],
+        }
+
+    def import_trust_snapshot(self, snap: dict) -> None:
+        """Restore trust state from :meth:`export_trust_snapshot`."""
+        from ieotbsm_core.agent_trust_persist import agent_trust_from_list
+        from ieotbsm_core.violation_persist import violation_from_dict
+
+        self.org_configs = snap.get("org_configs", self.org_configs)
+        self.alpha = float(snap.get("alpha", self.alpha))
+        self.tpm_mode = int(snap.get("tpm_mode", self.tpm_mode))
+        self.cycle = int(snap.get("cycle", 0))
+        self.ledger = InterOrgTrustLedger.from_persistence(snap["ledger"])
+        self.agent_trust = agent_trust_from_list(snap.get("agent_trust", []))
+        self.tpm = AgenticTPM.from_persistence(snap.get("tpm", {}))
+        self.tpm.decrement = float(snap.get("decrement", self.tpm.decrement))
+        self.tpm.mode = self.tpm_mode
+        self.human_review_queue = [
+            violation_from_dict(v) for v in snap.get("human_queue", [])
+        ]
         self.gate = TrustGate(self.ledger, self.agent_trust)
 
     # ─────────────────────────────────────────────────────────
@@ -224,7 +269,7 @@ class IEOTBSMAgenticNetwork:
         Run the same logic as execute_query_simulation but yield JSON-serializable
         event dicts for live dashboards (SSE). Ends with type ``query_complete``.
         """
-        from langgraph_impl import retrieve_from_org
+        from ieotbsm_core.knowledge import retrieve_from_org
 
         def _throttle() -> None:
             if throttle_ms > 0:

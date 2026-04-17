@@ -1,5 +1,14 @@
 # IEOTBSM PoC — install everything with: pip install -r requirements.txt
 #
+# Trust service stack (install editable packages from repo root)
+-e packages/ieotbsm_core
+-e services/trust_api
+-e services/trust_mcp
+pydantic-settings>=2.0
+sqlalchemy>=2.0
+httpx>=0.27
+mcp>=1.2.0
+
 # Core: simulation + LangGraph + LangChain messages
 langgraph>=0.2.0
 langchain-core>=0.3.0
